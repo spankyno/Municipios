@@ -21,22 +21,38 @@ const DIFFICULTY_CONFIG = {
 
 interface ProvinceFeature extends GeoJSON.Feature<GeoJSON.Geometry, any> {}
 
-const SPAIN_PROVINCES_URL = 'https://cdn.jsdelivr.net/gh/codeforgermany/click_that_hood@master/public/data/spain-provinces.geojson';
-const SPAIN_PROVINCES_FALLBACK_URL = 'https://cdn.jsdelivr.net/gh/inigoflores/municipios-espana@master/provincias.json';
-// Helper to fetch with CORS proxy fallback if direct fetch fails
+const CONFIG = {
+  PROVINCES: 'https://cdn.jsdelivr.net/gh/codeforgermany/click_that_hood@master/public/data/spain-provinces.geojson',
+  PROVINCES_FALLBACK: 'https://cdn.jsdelivr.net/gh/inigoflores/municipios-espana@master/provincias.json',
+  MUNICIPIOS: 'https://cdn.jsdelivr.net/gh/inigoflores/municipios-espana@master/municipios.json',
+  MUNICIPIOS_FALLBACK: 'https://cdn.jsdelivr.net/gh/frontid/municipios-espanoles@master/municipios.json',
+};
+
+// Helper to fetch with multiple fallbacks and proxies
 const fetchWithProxy = async (url: string) => {
+  // Strategy 1: Direct fetch
   try {
     const response = await fetch(url);
     if (response.ok) return await response.json();
-    throw new Error();
   } catch (e) {
-    // Fallback to a CORS proxy if direct fetch fails
+    console.warn(`Direct fetch failed for ${url}, trying proxy...`);
+  }
+
+  // Strategy 2: AllOrigins Proxy
+  try {
     const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
     const response = await fetch(proxyUrl);
-    if (!response.ok) throw new Error("Error de red");
-    const data = await response.json();
-    return JSON.parse(data.contents);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.contents) {
+        return JSON.parse(data.contents);
+      }
+    }
+  } catch (e) {
+    console.warn(`AllOrigins proxy failed for ${url}`);
   }
+
+  throw new Error(`No se pudo conectar con el servidor de datos`);
 };
 
 // Haversine formula to calculate distance between two points in km
@@ -94,9 +110,9 @@ export default function App() {
       try {
         let provData;
         try {
-          provData = await fetchWithProxy(SPAIN_PROVINCES_URL);
+          provData = await fetchWithProxy(CONFIG.PROVINCES);
         } catch {
-          provData = await fetchWithProxy(SPAIN_PROVINCES_FALLBACK_URL);
+          provData = await fetchWithProxy(CONFIG.PROVINCES_FALLBACK);
         }
         
         const features = Array.isArray(provData.features) 
@@ -108,9 +124,9 @@ export default function App() {
 
         let muniData;
         try {
-          muniData = await fetchWithProxy(MUNICIPIOS_URL);
+          muniData = await fetchWithProxy(CONFIG.MUNICIPIOS);
         } catch {
-          muniData = await fetchWithProxy(MUNICIPIOS_FALLBACK_URL);
+          muniData = await fetchWithProxy(CONFIG.MUNICIPIOS_FALLBACK);
         }
 
         // Normalize data
