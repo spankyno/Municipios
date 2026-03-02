@@ -21,11 +21,23 @@ const DIFFICULTY_CONFIG = {
 
 interface ProvinceFeature extends GeoJSON.Feature<GeoJSON.Geometry, any> {}
 
-const SPAIN_PROVINCES_URL = 'https://raw.githubusercontent.com/codeforgermany/click_that_hood/master/public/data/spain-provinces.geojson';
-const SPAIN_PROVINCES_FALLBACK_URL = 'https://raw.githubusercontent.com/inigoflores/municipios-espana/master/provincias.json';
-// Alternative source for municipalities if the primary one fails
-const MUNICIPIOS_URL = 'https://raw.githubusercontent.com/javierarce/municipios-de-espana/master/municipios.json';
-const MUNICIPIOS_FALLBACK_URL = 'https://raw.githubusercontent.com/inigoflores/municipios-espana/master/municipios.json';
+const SPAIN_PROVINCES_URL = 'https://cdn.jsdelivr.net/gh/codeforgermany/click_that_hood@master/public/data/spain-provinces.geojson';
+const SPAIN_PROVINCES_FALLBACK_URL = 'https://cdn.jsdelivr.net/gh/inigoflores/municipios-espana@master/provincias.json';
+// Helper to fetch with CORS proxy fallback if direct fetch fails
+const fetchWithProxy = async (url: string) => {
+  try {
+    const response = await fetch(url);
+    if (response.ok) return await response.json();
+    throw new Error();
+  } catch (e) {
+    // Fallback to a CORS proxy if direct fetch fails
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+    const response = await fetch(proxyUrl);
+    if (!response.ok) throw new Error("Error de red");
+    const data = await response.json();
+    return JSON.parse(data.contents);
+  }
+};
 
 // Haversine formula to calculate distance between two points in km
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
@@ -82,40 +94,32 @@ export default function App() {
       try {
         let provData;
         try {
-          const provRes = await fetch(SPAIN_PROVINCES_URL);
-          if (!provRes.ok) throw new Error();
-          provData = await provRes.json();
+          provData = await fetchWithProxy(SPAIN_PROVINCES_URL);
         } catch {
-          const provFallbackRes = await fetch(SPAIN_PROVINCES_FALLBACK_URL);
-          if (!provFallbackRes.ok) throw new Error("No se pudo cargar el mapa de provincias");
-          provData = await provFallbackRes.json();
+          provData = await fetchWithProxy(SPAIN_PROVINCES_FALLBACK_URL);
         }
         
         const features = Array.isArray(provData.features) 
           ? provData.features 
           : (Array.isArray(provData) ? provData : []);
         
-        if (features.length === 0) throw new Error("El mapa de provincias está vacío o tiene un formato incorrecto");
+        if (features.length === 0) throw new Error("El mapa de provincias está vacío");
         setProvinces(features);
 
         let muniData;
         try {
-          const muniRes = await fetch(MUNICIPIOS_URL);
-          if (!muniRes.ok) throw new Error();
-          muniData = await muniRes.json();
+          muniData = await fetchWithProxy(MUNICIPIOS_URL);
         } catch {
-          const muniFallbackRes = await fetch(MUNICIPIOS_FALLBACK_URL);
-          if (!muniFallbackRes.ok) throw new Error("No se pudo cargar la información de municipios");
-          muniData = await muniFallbackRes.json();
+          muniData = await fetchWithProxy(MUNICIPIOS_FALLBACK_URL);
         }
 
-        // Normalize data if needed (some sources use different keys)
+        // Normalize data
         const normalizedMuni = muniData.map((m: any) => ({
-          nombre: m.nombre || m.municipio,
-          provincia: m.provincia,
-          latitud: parseFloat(m.latitud || m.lat),
-          longitud: parseFloat(m.longitud || m.lon || m.lng),
-          poblacion: parseInt(m.poblacion || m.pop || 0)
+          nombre: m.nombre || m.municipio || m.name,
+          provincia: m.provincia || m.province,
+          latitud: parseFloat(m.latitud || m.lat || m.latitude),
+          longitud: parseFloat(m.longitud || m.lon || m.lng || m.longitude),
+          poblacion: parseInt(m.poblacion || m.pop || m.population || 0)
         })).filter((m: any) => !isNaN(m.latitud) && !isNaN(m.longitud));
 
         setMunicipalities(normalizedMuni);
