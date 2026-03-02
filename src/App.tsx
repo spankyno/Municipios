@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { MapPin, RefreshCw, Info, Navigation2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { FALLBACK_PROVINCES, FALLBACK_MUNICIPALITIES } from './data/fallbackData';
 
 interface Municipality {
   nombre: string;
@@ -22,6 +23,10 @@ const DIFFICULTY_CONFIG = {
 interface ProvinceFeature extends GeoJSON.Feature<GeoJSON.Geometry, any> {}
 
 const CONFIG = {
+  // Local paths (served from /public)
+  PROVINCES_LOCAL: '/data/provinces.json',
+  MUNICIPIOS_LOCAL: '/data/municipalities.json',
+  // Remote fallbacks
   PROVINCES: 'https://cdn.jsdelivr.net/gh/deldar182/geojson-spain@master/provincias.json',
   PROVINCES_FALLBACK: 'https://cdn.jsdelivr.net/gh/codeforgermany/click_that_hood@master/public/data/spain-provinces.geojson',
   MUNICIPIOS: 'https://cdn.jsdelivr.net/gh/draco-at-git/municipios-espanoles@master/municipios.json',
@@ -29,28 +34,29 @@ const CONFIG = {
 };
 
 // Helper to fetch with multiple fallbacks, proxies and retries
-const fetchWithProxy = async (url: string, retries = 2) => {
+const fetchWithProxy = async (url: string, retries = 1) => {
   const attempt = async (targetUrl: string): Promise<any> => {
-    // Strategy 1: Direct fetch
     try {
       const response = await fetch(targetUrl);
       if (response.ok) return await response.json();
     } catch (e) {
-      console.warn(`Direct fetch failed for ${targetUrl}`);
+      console.warn(`Fetch failed for ${targetUrl}`);
     }
 
-    // Strategy 2: AllOrigins Proxy
-    try {
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-      const response = await fetch(proxyUrl);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.contents) {
-          return JSON.parse(data.contents);
+    // Proxy as second attempt for remote URLs
+    if (targetUrl.startsWith('http')) {
+      try {
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+        const response = await fetch(proxyUrl);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.contents) {
+            return JSON.parse(data.contents);
+          }
         }
+      } catch (e) {
+        console.warn(`Proxy failed for ${targetUrl}`);
       }
-    } catch (e) {
-      console.warn(`Proxy failed for ${targetUrl}`);
     }
     
     throw new Error("Fetch failed");
@@ -61,8 +67,7 @@ const fetchWithProxy = async (url: string, retries = 2) => {
       return await attempt(url);
     } catch (err) {
       if (i === retries) throw err;
-      // Exponential backoff
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
+      await new Promise(resolve => setTimeout(resolve, 500 * (i + 1)));
     }
   }
 };
@@ -121,24 +126,42 @@ export default function App() {
       setError(null);
       try {
         let provData;
+        // Try local first, then remote, then fallback
         try {
-          provData = await fetchWithProxy(CONFIG.PROVINCES);
+          provData = await fetchWithProxy(CONFIG.PROVINCES_LOCAL);
         } catch {
-          provData = await fetchWithProxy(CONFIG.PROVINCES_FALLBACK);
+          try {
+            provData = await fetchWithProxy(CONFIG.PROVINCES);
+          } catch {
+            try {
+              provData = await fetchWithProxy(CONFIG.PROVINCES_FALLBACK);
+            } catch {
+              console.warn("Using hardcoded province fallback");
+              provData = FALLBACK_PROVINCES;
+            }
+          }
         }
         
         const features = Array.isArray(provData.features) 
           ? provData.features 
           : (Array.isArray(provData) ? provData : []);
         
-        if (features.length === 0) throw new Error("El mapa de provincias está vacío");
         setProvinces(features);
 
         let muniData;
         try {
-          muniData = await fetchWithProxy(CONFIG.MUNICIPIOS);
+          muniData = await fetchWithProxy(CONFIG.MUNICIPIOS_LOCAL);
         } catch {
-          muniData = await fetchWithProxy(CONFIG.MUNICIPIOS_FALLBACK);
+          try {
+            muniData = await fetchWithProxy(CONFIG.MUNICIPIOS);
+          } catch {
+            try {
+              muniData = await fetchWithProxy(CONFIG.MUNICIPIOS_FALLBACK);
+            } catch {
+              console.warn("Using hardcoded municipality fallback");
+              muniData = FALLBACK_MUNICIPALITIES;
+            }
+          }
         }
 
         // Normalize data
