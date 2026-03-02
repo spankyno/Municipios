@@ -22,37 +22,49 @@ const DIFFICULTY_CONFIG = {
 interface ProvinceFeature extends GeoJSON.Feature<GeoJSON.Geometry, any> {}
 
 const CONFIG = {
-  PROVINCES: 'https://cdn.jsdelivr.net/gh/codeforgermany/click_that_hood@master/public/data/spain-provinces.geojson',
-  PROVINCES_FALLBACK: 'https://cdn.jsdelivr.net/gh/inigoflores/municipios-espana@master/provincias.json',
-  MUNICIPIOS: 'https://cdn.jsdelivr.net/gh/inigoflores/municipios-espana@master/municipios.json',
+  PROVINCES: 'https://cdn.jsdelivr.net/gh/deldar182/geojson-spain@master/provincias.json',
+  PROVINCES_FALLBACK: 'https://cdn.jsdelivr.net/gh/codeforgermany/click_that_hood@master/public/data/spain-provinces.geojson',
+  MUNICIPIOS: 'https://cdn.jsdelivr.net/gh/draco-at-git/municipios-espanoles@master/municipios.json',
   MUNICIPIOS_FALLBACK: 'https://cdn.jsdelivr.net/gh/frontid/municipios-espanoles@master/municipios.json',
 };
 
-// Helper to fetch with multiple fallbacks and proxies
-const fetchWithProxy = async (url: string) => {
-  // Strategy 1: Direct fetch
-  try {
-    const response = await fetch(url);
-    if (response.ok) return await response.json();
-  } catch (e) {
-    console.warn(`Direct fetch failed for ${url}, trying proxy...`);
-  }
-
-  // Strategy 2: AllOrigins Proxy
-  try {
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-    const response = await fetch(proxyUrl);
-    if (response.ok) {
-      const data = await response.json();
-      if (data.contents) {
-        return JSON.parse(data.contents);
-      }
+// Helper to fetch with multiple fallbacks, proxies and retries
+const fetchWithProxy = async (url: string, retries = 2) => {
+  const attempt = async (targetUrl: string): Promise<any> => {
+    // Strategy 1: Direct fetch
+    try {
+      const response = await fetch(targetUrl);
+      if (response.ok) return await response.json();
+    } catch (e) {
+      console.warn(`Direct fetch failed for ${targetUrl}`);
     }
-  } catch (e) {
-    console.warn(`AllOrigins proxy failed for ${url}`);
-  }
 
-  throw new Error(`No se pudo conectar con el servidor de datos`);
+    // Strategy 2: AllOrigins Proxy
+    try {
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+      const response = await fetch(proxyUrl);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.contents) {
+          return JSON.parse(data.contents);
+        }
+      }
+    } catch (e) {
+      console.warn(`Proxy failed for ${targetUrl}`);
+    }
+    
+    throw new Error("Fetch failed");
+  };
+
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await attempt(url);
+    } catch (err) {
+      if (i === retries) throw err;
+      // Exponential backoff
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
+    }
+  }
 };
 
 // Haversine formula to calculate distance between two points in km
