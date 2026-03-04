@@ -1,8 +1,19 @@
-import React, { useEffect, useRef, useState } from 'react';
-import * as d3 from 'd3';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { MapPin, RefreshCw, Info, Navigation2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { MapContainer, TileLayer, GeoJSON, CircleMarker, Polyline, useMapEvents } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import { FALLBACK_PROVINCES, FALLBACK_MUNICIPALITIES } from './data/fallbackData';
+
+// Fix Leaflet default icon issue
+// @ts-ignore
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
 
 interface Municipality {
   nombre: string;
@@ -12,13 +23,17 @@ interface Municipality {
   poblacion: number;
 }
 
-type Difficulty = 'easy' | 'medium' | 'hard';
+type Difficulty = 1 | 2 | 3 | 4 | 5;
 
-const DIFFICULTY_CONFIG = {
-  easy: { label: 'Fácil', min: 20000, max: Infinity, description: '> 20.000 hab.' },
-  medium: { label: 'Medio', min: 500, max: 20000, description: '500 - 20.000 hab.' },
-  hard: { label: 'Difícil', min: 0, max: 500, description: '< 500 hab.' },
+const DIFFICULTY_CONFIG: Record<Difficulty, { label: string; min: number; description: string }> = {
+  1: { label: 'Nivel 1', min: 20000, description: '> 20.000 hab.' },
+  2: { label: 'Nivel 2', min: 10000, description: '> 10.000 hab.' },
+  3: { label: 'Nivel 3', min: 5000, description: '> 5.000 hab.' },
+  4: { label: 'Nivel 4', min: 3000, description: '> 3.000 hab.' },
+  5: { label: 'Nivel 5', min: 0, description: 'Todos' },
 };
+
+type GameStatus = 'idle' | 'playing' | 'finished';
 
 interface ProvinceFeature extends GeoJSON.Feature<GeoJSON.Geometry, any> {}
 
@@ -52,20 +67,17 @@ function deg2rad(deg: number) {
 }
 
 export default function App() {
-  const svgRef = useRef<SVGSVGElement>(null);
   const [provinces, setProvinces] = useState<ProvinceFeature[]>([]);
   const [municipalities, setMunicipalities] = useState<Municipality[]>([]);
-  const [difficulty, setDifficulty] = useState<Difficulty>('easy');
-  const [score, setScore] = useState<number | null>(null);
-  const [totalScore, setTotalScore] = useState(0);
-  const [attempts, setAttempts] = useState(0);
+  const [difficulty, setDifficulty] = useState<Difficulty>(3);
+  const [gameStatus, setGameStatus] = useState<GameStatus>('idle');
+  const [currentRound, setCurrentRound] = useState(0);
+  const [roundResults, setRoundResults] = useState<number[]>([]);
   const [targetMunicipality, setTargetMunicipality] = useState<Municipality | null>(null);
-  const [userClick, setUserClick] = useState<{ lat: number; lon: number; x: number; y: number } | null>(null);
+  const [userClick, setUserClick] = useState<{ lat: number; lon: number } | null>(null);
   const [distance, setDistance] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [projection, setProjection] = useState<d3.GeoProjection | null>(null);
-  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [dataStatus, setDataStatus] = useState<{
     provinces: 'loading' | 'ok' | 'error' | 'fallback';
     municipalities: 'loading' | 'ok' | 'error' | 'fallback';
@@ -75,6 +87,8 @@ export default function App() {
     municipalities: 'loading',
     details: []
   });
+
+  const MAX_ROUNDS = 5;
 
   const addDetail = (msg: string) => {
     setDataStatus(prev => ({ ...prev, details: [...prev.details, msg] }));
@@ -128,22 +142,6 @@ export default function App() {
   };
 
   const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const observer = new ResizeObserver((entries) => {
-      if (entries[0]) {
-        const { width, height } = entries[0].contentRect;
-        console.log(`Container resized: ${width}x${height}`);
-        setDimensions({ width, height });
-      }
-    });
-
-    if (containerRef.current) {
-      observer.observe(containerRef.current);
-    }
-
-    return () => observer.disconnect();
-  }, []);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -207,8 +205,11 @@ export default function App() {
           provSource = 'fallback';
         }
 
-        addDetail(`✅ ${features.length} provincias cargadas`);
-        setProvinces(features);
+        // Filter out features with invalid geometry to prevent Leaflet crashes
+        const validFeatures = features.filter(f => f && f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon'));
+        
+        addDetail(`✅ ${validFeatures.length} provincias válidas cargadas`);
+        setProvinces(validFeatures);
         setDataStatus(prev => ({ ...prev, provinces: provSource }));
 
         let muniData;
@@ -308,137 +309,164 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (municipalities.length > 0 && !targetMunicipality) {
+    if (gameStatus === 'playing' && municipalities.length > 0 && !targetMunicipality) {
+      const config = DIFFICULTY_CONFIG[difficulty];
       const filtered = municipalities.filter((m: Municipality) => 
-        m.poblacion >= DIFFICULTY_CONFIG[difficulty].min && m.poblacion <= DIFFICULTY_CONFIG[difficulty].max
+        m.poblacion >= config.min
       );
       const randomMuni = filtered[Math.floor(Math.random() * filtered.length)] || municipalities[0];
       setTargetMunicipality(randomMuni);
     }
-  }, [municipalities, difficulty]);
+  }, [municipalities, difficulty, targetMunicipality, gameStatus]);
 
 
-  useEffect(() => {
-    console.log(`Current provinces count: ${provinces.length}`);
-    if (provinces.length > 0) {
-      console.log('Sample province:', provinces[0]);
-    }
-  }, [provinces]);
+  const handleMapClick = (lat: number, lon: number) => {
+    if (gameStatus !== 'playing' || !targetMunicipality || distance !== null) return;
 
-  useEffect(() => {
-    try {
-      if (!svgRef.current || !Array.isArray(provinces) || provinces.length === 0 || dimensions.width === 0) {
-        console.log('Skipping render:', { 
-          hasSvg: !!svgRef.current, 
-          provIsArray: Array.isArray(provinces),
-          provCount: provinces?.length, 
-          width: dimensions.width 
-        });
-        return;
-      }
-
-      const { width, height } = dimensions;
-      console.log(`Rendering map: ${width}x${height}, provinces: ${provinces.length}`);
-      
-      const svg = d3.select(svgRef.current);
-      svg.selectAll(".map-layer").remove();
-
-      const proj = d3.geoMercator();
-      
-      const featureCollection = { type: 'FeatureCollection', features: provinces };
-      console.log('Fitting size for feature collection:', featureCollection);
-      
-      proj.fitSize([width, height], featureCollection as any);
-
-      setProjection(() => proj);
-
-      const path = d3.geoPath().projection(proj);
-
-      const g = svg.append("g").attr("class", "map-layer");
-
-      // Draw provinces
-      if (Array.isArray(provinces) && provinces.length > 0) {
-        const validProvinces = provinces.filter(f => f && f.geometry);
-        console.log(`Drawing ${validProvinces.length} valid provinces`);
-        
-        const colorScale = d3.scaleOrdinal(d3.schemePastel1);
-
-        g.selectAll("path")
-          .data(validProvinces)
-          .enter()
-          .append("path")
-          .attr("d", path as any)
-          .attr("class", "province")
-          .attr("fill", (d, i) => colorScale(i.toString()))
-          .attr("stroke", "#334155")
-          .attr("stroke-width", 0.5)
-          .attr("stroke-linejoin", "round")
-          .on("mouseover", function() {
-            d3.select(this).attr("fill-opacity", 0.8);
-          })
-          .on("mouseout", function() {
-            d3.select(this).attr("fill-opacity", 1);
-          })
-          .on("click", (event) => {
-            event.stopPropagation();
-            const [x, y] = d3.pointer(event);
-            const coords = proj.invert!([x, y]);
-            if (coords && targetMunicipality) {
-              handleMapClick(coords[1], coords[0], x, y);
-            }
-          });
-      } else {
-        console.warn("No provinces to draw");
-      }
-
-      // Handle click on the background
-      svg.on("click", (event) => {
-        if (event.target.tagName === 'svg') {
-          const [x, y] = d3.pointer(event);
-          const coords = proj.invert!([x, y]);
-          if (coords && targetMunicipality) {
-            handleMapClick(coords[1], coords[0], x, y);
-          }
-        }
-      });
-    } catch (err) {
-      console.error("Error rendering map:", err);
-      setError("Error al dibujar el mapa. Por favor, recarga la página.");
-    }
-
-  }, [provinces, targetMunicipality, dimensions]);
-
-  const handleMapClick = (lat: number, lon: number, x: number, y: number) => {
-    if (!targetMunicipality || distance !== null) return;
-
-    setUserClick({ lat, lon, x, y });
     const dist = calculateDistance(lat, lon, targetMunicipality.latitud, targetMunicipality.longitud);
+    setUserClick({ lat, lon });
     setDistance(dist);
+    
+    // Record result
+    const newResults = [...roundResults, dist];
+    setRoundResults(newResults);
 
-    // Calculate score: 1000 points max, decreases with distance
-    // 0 points at 500km
-    const points = Math.max(0, Math.round(1000 * Math.exp(-dist / 100)));
-    setScore(points);
-    setTotalScore(prev => prev + points);
-    setAttempts(prev => prev + 1);
+    // Auto-advance after a delay
+    setTimeout(() => {
+      if (currentRound + 1 < MAX_ROUNDS) {
+        setCurrentRound(prev => prev + 1);
+        nextRound();
+      } else {
+        setGameStatus('finished');
+      }
+    }, 1500);
   };
+
+  const nextRound = () => {
+    const config = DIFFICULTY_CONFIG[difficulty];
+    const filtered = municipalities.filter((m: Municipality) => 
+      m.poblacion >= config.min
+    );
+    const randomMuni = filtered[Math.floor(Math.random() * filtered.length)] || municipalities[0];
+    setTargetMunicipality(randomMuni);
+    setUserClick(null);
+    setDistance(null);
+  };
+
+  const startGame = () => {
+    setGameStatus('playing');
+    setCurrentRound(0);
+    setRoundResults([]);
+    nextRound();
+  };
+
+  function MapEvents() {
+    const map = useMapEvents({
+      click(e) {
+        // Only trigger if it's a left click (button 0)
+        // Leaflet's click event doesn't always expose the original event's button easily
+        // but standard click is usually left click.
+        handleMapClick(e.latlng.lat, e.latlng.lng);
+      },
+      contextmenu(e) {
+        // Right click - Leaflet handles contextmenu
+        // We don't need to do anything special here if we want default context menu,
+        // but the user wants right-click to pan.
+        // To do that, we need to enable dragging ONLY when right button is down.
+      }
+    });
+
+    useEffect(() => {
+      if (!map) return;
+
+      // Custom right-click pan implementation
+      let isRightDragging = false;
+      let lastPos: L.Point | null = null;
+
+      const onMouseDown = (e: MouseEvent) => {
+        if (e.button === 2) { // Right click
+          isRightDragging = true;
+          lastPos = map.mouseEventToContainerPoint(e);
+          map.dragging.disable(); // Disable default dragging (which is left click)
+          e.preventDefault();
+        }
+      };
+
+      const onMouseMove = (e: MouseEvent) => {
+        if (isRightDragging && lastPos) {
+          const currentPos = map.mouseEventToContainerPoint(e);
+          const deltaX = lastPos.x - currentPos.x;
+          const deltaY = lastPos.y - currentPos.y;
+          map.panBy([deltaX, deltaY], { animate: false });
+          lastPos = currentPos;
+        }
+      };
+
+      const onMouseUp = (e: MouseEvent) => {
+        if (e.button === 2) {
+          isRightDragging = false;
+          lastPos = null;
+        }
+      };
+
+      const container = map.getContainer();
+      container.addEventListener('mousedown', onMouseDown);
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+      container.addEventListener('contextmenu', (e) => e.preventDefault());
+
+      return () => {
+        container.removeEventListener('mousedown', onMouseDown);
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+        container.removeEventListener('contextmenu', (e) => e.preventDefault());
+      };
+    }, [map]);
+
+    return null;
+  }
+
+  const provinceStyle = {
+    fillColor: '#fef3c7',
+    weight: 1,
+    opacity: 1,
+    color: '#334155',
+    fillOpacity: 0.7
+  };
+
+  const onEachProvince = (feature: any, layer: any) => {
+    layer.on({
+      mouseover: (e: any) => {
+        const l = e.target;
+        l.setStyle({
+          fillOpacity: 0.9,
+          fillColor: '#fde68a'
+        });
+      },
+      mouseout: (e: any) => {
+        const l = e.target;
+        l.setStyle({
+          fillOpacity: 0.7,
+          fillColor: '#fef3c7'
+        });
+      }
+    });
+  };
+
+  const geoJsonData = useMemo(() => ({
+    type: 'FeatureCollection' as const,
+    features: provinces
+  }), [provinces]);
 
   const resetGame = (newDifficulty?: Difficulty) => {
     const diff = newDifficulty || difficulty;
     if (newDifficulty) setDifficulty(newDifficulty);
-
-    const filtered = municipalities.filter((m: Municipality) => 
-      m.poblacion >= DIFFICULTY_CONFIG[diff].min && m.poblacion <= DIFFICULTY_CONFIG[diff].max
-    );
-    
-    if (filtered.length > 0) {
-      const randomMuni = filtered[Math.floor(Math.random() * filtered.length)];
-      setTargetMunicipality(randomMuni);
-    }
-    
+    setGameStatus('idle');
+    setRoundResults([]);
+    setCurrentRound(0);
+    setTargetMunicipality(null);
     setUserClick(null);
     setDistance(null);
-    setScore(null);
   };
 
   if (loading) {
@@ -481,9 +509,9 @@ export default function App() {
   }
 
   return (
-    <div className="relative w-full h-screen overflow-hidden flex flex-col">
+    <div className="relative w-full h-screen overflow-hidden flex flex-col bg-stone-100">
       {/* Header */}
-      <header className="h-20 bg-white border-b border-stone-200 flex items-center justify-between px-8 z-10 shadow-sm">
+      <header className="h-20 bg-white border-b border-stone-200 flex items-center justify-between px-8 z-20 shadow-sm">
         <div className="flex items-center gap-3">
           <div className="bg-emerald-100 p-2 rounded-lg">
             <Navigation2 className="w-6 h-6 text-emerald-600 fill-emerald-600" />
@@ -494,186 +522,205 @@ export default function App() {
           </div>
         </div>
 
-        {/* Data Warning */}
-        {(dataStatus.provinces === 'fallback' || dataStatus.municipalities === 'fallback') && (
-          <div className="hidden md:flex items-center gap-2 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg text-[10px] text-amber-700">
-            <Info className="w-3 h-3" />
-            <span>Usando datos de emergencia. Sube <b>municipalities.json</b> a /public/data/</span>
-          </div>
-        )}
-
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-6">
           {/* Difficulty Selector */}
           <div className="flex bg-stone-100 p-1 rounded-xl border border-stone-200">
-            {(Object.keys(DIFFICULTY_CONFIG) as Difficulty[]).map((d) => (
+            {(Object.keys(DIFFICULTY_CONFIG).map(Number) as Difficulty[]).map((d) => (
               <button
                 key={d}
                 onClick={() => resetGame(d)}
-                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
                   difficulty === d 
                     ? 'bg-white text-stone-900 shadow-sm' 
                     : 'text-stone-400 hover:text-stone-600'
                 }`}
+                title={DIFFICULTY_CONFIG[d].description}
               >
                 {DIFFICULTY_CONFIG[d].label}
               </button>
             ))}
           </div>
 
-          {/* Score Board */}
-          <div className="flex items-center gap-6 px-6 py-2 bg-stone-50 rounded-xl border border-stone-200">
-            <div className="flex flex-col items-center">
-              <span className="text-[10px] text-stone-400 font-bold uppercase tracking-widest">Puntos</span>
-              <span className="text-lg font-black text-stone-900">{totalScore.toLocaleString()}</span>
-            </div>
-            <div className="w-px h-8 bg-stone-200" />
-            <div className="flex flex-col items-center">
-              <span className="text-[10px] text-stone-400 font-bold uppercase tracking-widest">Intentos</span>
-              <span className="text-lg font-black text-stone-900">{attempts}</span>
-            </div>
-          </div>
+          {gameStatus === 'playing' && targetMunicipality && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-stone-900 text-white px-6 py-2 rounded-full shadow-lg flex items-center gap-3"
+            >
+              <span className="text-stone-400 text-xs font-bold uppercase tracking-widest">Ronda {currentRound + 1}/5:</span>
+              <span className="text-lg font-bold">{targetMunicipality.nombre}</span>
+              <span className="text-stone-400 text-sm">({targetMunicipality.provincia})</span>
+            </motion.div>
+          )}
 
-          <AnimatePresence mode="wait">
-            {targetMunicipality && (
-              <motion.div
-                key={targetMunicipality.nombre}
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 10 }}
-                className="bg-stone-900 text-white px-6 py-2 rounded-full shadow-lg flex items-center gap-3"
-              >
-                <span className="text-stone-400 text-xs font-bold uppercase tracking-widest">Busca:</span>
-                <span className="text-lg font-bold">{targetMunicipality.nombre}</span>
-                <span className="text-stone-400 text-sm">({targetMunicipality.provincia})</span>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          {gameStatus === 'finished' && (
+             <div className="bg-emerald-600 text-white px-6 py-2 rounded-full shadow-lg font-bold">
+               ¡Juego Terminado!
+             </div>
+          )}
           
           <button 
-            onClick={resetGame}
+            onClick={() => resetGame()}
             className="p-2 hover:bg-stone-100 rounded-full transition-colors text-stone-600"
-            title="Nuevo municipio"
+            title="Reiniciar"
           >
             <RefreshCw className="w-5 h-5" />
           </button>
         </div>
       </header>
 
-      {/* Map Area */}
-      <main ref={containerRef} className="flex-1 relative bg-[#0ea5e9] cursor-crosshair border-8 border-stone-300 m-4 rounded-[2rem] overflow-hidden shadow-2xl">
-        <div className="absolute top-4 right-4 z-20 bg-white/90 backdrop-blur px-3 py-1 rounded-full text-[10px] font-bold text-stone-500 shadow-sm border border-stone-200">
-          Provincias: {provinces.length} | Municipios: {municipalities.length}
-        </div>
-        <svg 
-          ref={svgRef} 
-          className="w-full h-full border-4 border-white/20 rounded-[1.5rem]"
-          style={{ filter: 'drop-shadow(0 10px 15px rgba(0,0,0,0.2))' }}
-        >
-          {/* Sea background */}
-          <rect width="100%" height="100%" fill="#bae6fd" />
-          
-          {provinces.length === 0 && (
-            <text x="50%" y="50%" textAnchor="middle" fill="#0369a1" className="text-sm font-bold">
-              Cargando mapa base...
-            </text>
-          )}
-          {/* D3 renders here */}
-          {projection && targetMunicipality && userClick && (
-            <g>
-              {/* Target Point */}
-              {(() => {
-                const [tx, ty] = projection([targetMunicipality.longitud, targetMunicipality.latitud]) || [0, 0];
-                return (
-                  <>
-                    <motion.line
-                      initial={{ pathLength: 0, opacity: 0 }}
-                      animate={{ pathLength: 1, opacity: 1 }}
-                      x1={userClick.x}
-                      y1={userClick.y}
-                      x2={tx}
-                      y2={ty}
-                      className="distance-line"
-                    />
-                    <circle cx={tx} cy={ty} r={6} className="municipality-dot" />
-                    <circle cx={userClick.x} cy={userClick.y} r={6} className="click-dot" />
-                  </>
-                );
-              })()}
-            </g>
-          )}
-        </svg>
-
-        {/* Distance Result Overlay */}
-        <AnimatePresence>
-          {distance !== null && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="absolute bottom-12 left-1/2 -translate-x-1/2 bg-white p-6 rounded-2xl shadow-2xl border border-stone-200 flex flex-col items-center gap-4 min-w-[350px]"
-            >
-              <div className="flex w-full justify-between items-center gap-8">
-                <div className="text-center flex-1">
-                  <p className="text-stone-500 text-[10px] font-bold uppercase tracking-widest mb-1">Distancia</p>
-                  <p className="text-3xl font-black text-stone-900">
-                    {distance.toFixed(1)} <span className="text-xl font-bold text-stone-400">km</span>
-                  </p>
-                </div>
-                
-                <div className="w-px h-12 bg-stone-100" />
-
-                <div className="text-center flex-1">
-                  <p className="text-stone-500 text-[10px] font-bold uppercase tracking-widest mb-1">Puntuación</p>
-                  <motion.p 
-                    initial={{ scale: 1.5, color: '#10b981' }}
-                    animate={{ scale: 1, color: '#1c1917' }}
-                    className="text-3xl font-black"
-                  >
-                    +{score}
-                  </motion.p>
-                </div>
-              </div>
-              
-              <div className="w-full h-px bg-stone-100" />
-              
-              <div className="w-full flex flex-col gap-2">
-                <p className="text-center text-[10px] text-stone-400 font-medium">
-                  Población: {targetMunicipality?.poblacion.toLocaleString()} habitantes
-                </p>
-                <button
-                  onClick={() => resetGame()}
-                  className="w-full bg-stone-900 hover:bg-stone-800 text-white font-bold py-3 rounded-xl transition-all shadow-md flex items-center justify-center gap-2"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  Siguiente municipio
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Instructions */}
-        {!userClick && (
-          <div className="absolute top-6 left-6 bg-white/80 backdrop-blur-md p-4 rounded-xl border border-white/20 shadow-sm pointer-events-none">
-            <div className="flex items-center gap-2 text-stone-700 mb-1">
-              <Info className="w-4 h-4" />
-              <span className="text-sm font-bold">Instrucciones</span>
-            </div>
-            <p className="text-xs text-stone-500 leading-relaxed">
-              Haz click en el mapa donde creas que se sitúa el municipio indicado arriba.
-            </p>
+      <div className="flex-1 flex overflow-hidden p-4 gap-4">
+        {/* Left Sidebar: Results */}
+        <aside className="w-72 bg-white rounded-3xl shadow-xl border border-stone-200 flex flex-col overflow-hidden">
+          <div className="p-6 border-b border-stone-100 bg-stone-50/50">
+            <h2 className="text-sm font-black text-stone-900 uppercase tracking-widest flex items-center gap-2">
+              <MapPin className="w-4 h-4 text-emerald-600" />
+              Resultados
+            </h2>
           </div>
-        )}
-      </main>
+          
+          <div className="flex-1 overflow-auto p-4">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="text-[10px] font-bold text-stone-400 uppercase tracking-widest border-b border-stone-100">
+                  <th className="pb-2 pl-2">Ronda</th>
+                  <th className="pb-2 pr-2 text-right">Distancia</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-50">
+                {[...Array(MAX_ROUNDS)].map((_, i) => (
+                  <tr key={i} className={`text-sm ${currentRound === i && gameStatus === 'playing' ? 'bg-emerald-50/50' : ''}`}>
+                    <td className="py-3 pl-2 font-medium text-stone-600">Pregunta {i + 1}</td>
+                    <td className="py-3 pr-2 text-right font-bold text-stone-900">
+                      {roundResults[i] !== undefined ? `${roundResults[i].toFixed(1)} km` : '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
-      {/* Footer / Credits */}
-      <footer className="h-10 bg-stone-50 border-t border-stone-200 flex items-center justify-between px-8 text-[10px] text-stone-400 font-medium uppercase tracking-widest">
-        <span>Datos: IGN España & Javier Arce</span>
+          {gameStatus === 'finished' && (
+            <div className="p-6 bg-stone-900 text-white">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-stone-400 mb-1">Media Final</p>
+              <p className="text-3xl font-black">
+                {(roundResults.reduce((a, b) => a + b, 0) / roundResults.length).toFixed(1)}
+                <span className="text-sm font-bold text-stone-400 ml-1">km</span>
+              </p>
+              <button 
+                onClick={startGame}
+                className="mt-4 w-full bg-emerald-500 hover:bg-emerald-400 text-white font-bold py-2 rounded-xl transition-colors text-sm"
+              >
+                Jugar de nuevo
+              </button>
+            </div>
+          )}
+        </aside>
+
+        {/* Map Area */}
+        <main className="flex-1 relative bg-white rounded-3xl overflow-hidden shadow-xl border border-stone-200 group">
+          <MapContainer
+            center={[40.416775, -3.703790]}
+            zoom={6}
+            className="w-full h-full cursor-crosshair"
+            attributionControl={false}
+            dragging={false} // We handle right-click dragging manually
+            doubleClickZoom={false}
+          >
+            <TileLayer
+              url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+            />
+            
+            {provinces.length > 0 && (
+              <GeoJSON 
+                key={`provinces-${provinces.length}`}
+                data={geoJsonData as any} 
+                style={provinceStyle}
+                onEachFeature={onEachProvince}
+              />
+            )}
+
+            <MapEvents />
+
+            {/* Target and User markers as small dots */}
+            {userClick && (
+              <CircleMarker 
+                center={[userClick.lat, userClick.lon]} 
+                radius={3}
+                pathOptions={{ fillColor: '#1c1917', fillOpacity: 1, color: '#fff', weight: 1.5 }}
+              />
+            )}
+            
+            {distance !== null && targetMunicipality && (
+              <>
+                <CircleMarker 
+                  center={[targetMunicipality.latitud, targetMunicipality.longitud]} 
+                  radius={3}
+                  pathOptions={{ fillColor: '#ef4444', fillOpacity: 1, color: '#fff', weight: 1.5 }}
+                />
+                <Polyline 
+                  positions={[
+                    [userClick!.lat, userClick!.lon],
+                    [targetMunicipality.latitud, targetMunicipality.longitud]
+                  ]}
+                  color="#ef4444"
+                  weight={2}
+                  dashArray="5, 10"
+                />
+              </>
+            )}
+          </MapContainer>
+
+          {/* Overlay for Idle State */}
+          {gameStatus === 'idle' && (
+            <div className="absolute inset-0 z-[1001] bg-stone-900/40 backdrop-blur-sm flex items-center justify-center">
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className="bg-white p-10 rounded-[2.5rem] shadow-2xl text-center max-w-sm border border-stone-100"
+              >
+                <div className="bg-emerald-100 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto mb-6 rotate-3">
+                  <Navigation2 className="w-10 h-10 text-emerald-600 fill-emerald-600" />
+                </div>
+                <h2 className="text-3xl font-black text-stone-900 mb-2 tracking-tight">¿Cuánto conoces España?</h2>
+                <p className="text-stone-500 mb-8 text-sm leading-relaxed">
+                  Adivina la ubicación de 5 municipios. <br/>
+                  Cuanto más cerca, mejor nota.
+                </p>
+                <button 
+                  onClick={startGame}
+                  className="w-full bg-stone-900 hover:bg-stone-800 text-white font-black py-4 rounded-2xl transition-all shadow-lg hover:shadow-xl active:scale-95"
+                >
+                  COMENZAR JUEGO
+                </button>
+              </motion.div>
+            </div>
+          )}
+
+          {/* Precision Cursor Indicator (Dynamic via CSS) */}
+        </main>
+      </div>
+
+      {/* Footer */}
+      <footer className="h-10 bg-white border-t border-stone-200 flex items-center justify-between px-8 text-[10px] text-stone-400 font-bold uppercase tracking-widest">
         <div className="flex gap-4">
-          <span>Municipios cargados: {municipalities.length}</span>
           <span>Provincias: {provinces.length}</span>
+          <span>Municipios: {municipalities.length}</span>
+        </div>
+        <div className="flex gap-4 items-center">
+          <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-emerald-500" /> Click: Marcar</span>
+          <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-blue-500" /> Click Derecho: Mover</span>
         </div>
       </footer>
+
+      <style>{`
+        .leaflet-container {
+          cursor: crosshair !important;
+        }
+        .cursor-crosshair {
+          cursor: crosshair !important;
+        }
+      `}</style>
     </div>
   );
 }
